@@ -2,8 +2,15 @@ SealClubPlus is an Ashita v4 addon based on SealClub that tracks Beastman's and 
 
 Clone Note:
 - This addon is a clone/fork of the original SealClub addon by samsonffxi.
+- Original project: https://github.com/samson-ffxi/sealclub
 - SealClubPlus was created as a separate addon so the original SealClub can remain untouched.
 - Repository: https://github.com/haeal/sealclubplus
+
+Licensing:
+- The original SealClub project is distributed under the MIT License.
+- SealClubPlus retains the original MIT license text in the LICENSE file as required by that license.
+- Additions and modifications in SealClubPlus are distributed under the same MIT License unless stated otherwise.
+- Copyright for the original project remains with the original author.
 
 Commands:
 - /sealclubplus
