@@ -3,7 +3,7 @@
 --]]
 
 addon.author    = 'samsonffxi, haeal';
-addon.version   = '1.1.0';
+addon.version   = '1.2.0';
 addon.desc      = 'Seal farming with ready sound alerts.';
 addon.link      = 'https://github.com/haeal/sealclubplus';
 addon.name      = 'sealclubplus';
@@ -36,6 +36,10 @@ local default_settings = T{
 	seal_timer_warn_color = {1.0, 0.0, 0.0, 1.0}, --red
 	bseal_cooldown = 300,
     kseal_cooldown = 900,
+    shared_beastman_timer = T{ false, },
+    kill_detect_text = T{ true, },
+    kill_detect_packet = T{ true, },
+    kill_detect_exp = T{ false, },
     sound_enabled = T{ true, },
     sound_file = 'water_tink.wav',
 };
@@ -71,9 +75,15 @@ local sealclub = T{
 
     bseal_notified = true,
     kseal_notified = true,
+    last_unspecified_kill = 0,
+    last_counted_kill = 0,
+    recent_kill_targets = T{ },
 
     myname = '',
 };
+
+local KILL_DEDUPE_WINDOW = 1.5;
+local TARGET_KILL_MEMORY_WINDOW = 10.0;
 
 local function get_sound_files()
     return T(ashita.fs.get_dir(addon.path:append('\\sounds\\'), '.*.wav', true) or { });
@@ -109,6 +119,89 @@ local function play_ready_sound()
     end
 
     ashita.misc.play_sound(addon.path:append('\\sounds\\'):append(sound_file));
+end
+
+local function play_selected_sound_preview()
+    local sound_file = sealclub.settings.sound_file;
+    if (type(sound_file) ~= 'string' or sound_file == '') then
+        return;
+    end
+
+    ashita.misc.play_sound(addon.path:append('\\sounds\\'):append(sound_file));
+end
+
+local function prune_recent_kills(now)
+    for target_id, kill_time in pairs(sealclub.recent_kill_targets) do
+        if ((now - kill_time) > TARGET_KILL_MEMORY_WINDOW) then
+            sealclub.recent_kill_targets[target_id] = nil;
+        end
+    end
+
+    if (sealclub.last_unspecified_kill > 0 and (now - sealclub.last_unspecified_kill) > KILL_DEDUPE_WINDOW) then
+        sealclub.last_unspecified_kill = 0;
+    end
+end
+
+local function register_kill_for_target(target_id)
+    local now = os.clock();
+    prune_recent_kills(now);
+
+    if (target_id ~= nil and target_id > 0) then
+        local last_target_kill = sealclub.recent_kill_targets[target_id];
+        if (last_target_kill ~= nil and (now - last_target_kill) < TARGET_KILL_MEMORY_WINDOW) then
+            return false;
+        end
+
+        if (sealclub.last_unspecified_kill > 0 and (now - sealclub.last_unspecified_kill) < KILL_DEDUPE_WINDOW) then
+            sealclub.recent_kill_targets[target_id] = sealclub.last_unspecified_kill;
+            sealclub.last_unspecified_kill = 0;
+            return false;
+        end
+
+        sealclub.recent_kill_targets[target_id] = now;
+    end
+
+    sealclub.seals_clubbed = sealclub.seals_clubbed + 1;
+    sealclub.last_counted_kill = now;
+    return true;
+end
+
+local function register_text_kill()
+    local now = os.clock();
+    prune_recent_kills(now);
+
+    if ((sealclub.settings.kill_detect_packet[1] or sealclub.settings.kill_detect_exp[1]) and sealclub.last_counted_kill > 0 and (now - sealclub.last_counted_kill) < KILL_DEDUPE_WINDOW) then
+        return false;
+    end
+
+    sealclub.seals_clubbed = sealclub.seals_clubbed + 1;
+    sealclub.last_unspecified_kill = now;
+    sealclub.last_counted_kill = now;
+    return true;
+end
+
+local function get_local_player_and_pet_ids()
+    local party = AshitaCore:GetMemoryManager():GetParty();
+    local entity = AshitaCore:GetMemoryManager():GetEntity();
+    local player_id = party:GetMemberServerId(0);
+    local player_index = party:GetMemberTargetIndex(0);
+    local pet_index = entity:GetPetTargetIndex(player_index);
+    local pet_id = 0;
+
+    if (pet_index ~= nil and pet_index > 0) then
+        pet_id = entity:GetServerId(pet_index);
+    end
+
+    return player_id, pet_id;
+end
+
+local function is_local_player_or_pet_actor(actor_id)
+    local player_id, pet_id = get_local_player_and_pet_ids();
+    return (actor_id ~= 0 and (actor_id == player_id or actor_id == pet_id));
+end
+
+local function is_reward_kill_message(message_id)
+    return T{ 8, 50, 105, 253, 368, 371, 372, 718, 719, 735 }:contains(message_id);
 end
 
 --[[
@@ -148,7 +241,7 @@ function render_general_config_plus(settings)
     ensure_selected_sound(sound_files);
 
     imgui.Text('General Settings');
-    imgui.BeginChild('settings_general_plus', { 0, 260, }, true);
+    imgui.BeginChild('settings_general_plus', { 0, 360, }, true);
         imgui.ShowHelp('Toggles if SealClubPlus is visible or not.');
         imgui.SliderFloat('Opacity', sealclub.settings.opacity, 0.125, 1.0, '%.3f');
         imgui.ShowHelp('The opacity of the SealClubPlus window.');
@@ -162,22 +255,48 @@ function render_general_config_plus(settings)
         end
         imgui.ShowHelp('The position of SealClubPlus on screen.');
 
+        imgui.Checkbox('Use Shared Beastman Timer', sealclub.settings.shared_beastman_timer);
+        imgui.ShowHelp('When enabled, any Beastman or Kindred seal drop starts both timers using the Beastman seal cooldown.');
+
+        imgui.Text('Kill Detection');
+        imgui.Checkbox('Use Chat Defeat Text', sealclub.settings.kill_detect_text);
+        imgui.ShowHelp('Counts kills from the chat log defeat line. This may miss kills where your pet gets the killing blow.');
+        imgui.Checkbox('Use Kill Message Packet', sealclub.settings.kill_detect_packet);
+        imgui.ShowHelp('Counts kills from incoming action message packet 0x029. Supports local-player and local-pet killing blows.');
+        imgui.Checkbox('Use Reward Packet', sealclub.settings.kill_detect_exp);
+        imgui.ShowHelp('Counts kills from incoming reward packet 0x02D when the local player receives XP, limit, merit, or capacity rewards.');
+
         imgui.Checkbox('Enable Ready Sound', sealclub.settings.sound_enabled);
         imgui.ShowHelp('Plays a short sound when a Beastman or Kindred seal timer becomes ready.');
 
         if (#sound_files == 0) then
             imgui.TextColored({ 1.0, 0.8, 0.2, 1.0 }, 'No .wav files found in the sounds folder.');
-        elseif (imgui.BeginCombo('Ready Sound', sealclub.settings.sound_file)) then
-            for _, sound_file in ipairs(sound_files) do
-                local is_selected = (sound_file == sealclub.settings.sound_file);
-                if (imgui.Selectable(sound_file, is_selected) and not is_selected) then
-                    sealclub.settings.sound_file = sound_file;
+        else
+            local combo_width = 360;
+
+            imgui.PushItemWidth(combo_width);
+            if (imgui.BeginCombo('Ready Sound', sealclub.settings.sound_file)) then
+                for _, sound_file in ipairs(sound_files) do
+                    local is_selected = (sound_file == sealclub.settings.sound_file);
+                    if (imgui.Selectable(sound_file, is_selected) and not is_selected) then
+                        sealclub.settings.sound_file = sound_file;
+                    end
+                    if (is_selected) then
+                        imgui.SetItemDefaultFocus();
+                    end
                 end
-                if (is_selected) then
-                    imgui.SetItemDefaultFocus();
-                end
+                imgui.EndCombo();
             end
-            imgui.EndCombo();
+            imgui.PopItemWidth();
+
+            if (imgui.Button('Play Selected Sound##ready_sound_preview')) then
+                play_selected_sound_preview();
+            end
+            imgui.ShowHelp('Plays the currently selected ready sound immediately for preview.');
+
+            if (not sealclub.settings.sound_enabled[1]) then
+                imgui.TextColored({ 1.0, 0.8, 0.2, 1.0 }, 'Ready sound is currently disabled, but preview still works.');
+            end
         end
         imgui.ShowHelp('Selects a .wav file from the sealclubplus sounds folder.');
 
@@ -335,6 +454,27 @@ ashita.events.register('packet_in', 'sealclubplus_packet_in_cb', function (e)
         sealclub.last_bseal = 0;
         sealclub.kseal_notified = true;
         sealclub.bseal_notified = true;
+        sealclub.last_unspecified_kill = 0;
+        sealclub.last_counted_kill = 0;
+        sealclub.recent_kill_targets = T{ };
+    elseif (e.id == 0x029 and sealclub.settings.kill_detect_packet[1]) then
+        local actor_id = struct.unpack('I', e.data_modified, 0x05);
+        local target_id = struct.unpack('I', e.data_modified, 0x09);
+        local message_id = struct.unpack('H', e.data_modified, 0x19);
+
+        if (message_id == 6 and is_local_player_or_pet_actor(actor_id)) then
+            register_kill_for_target(target_id);
+        end
+    elseif (e.id == 0x02D and sealclub.settings.kill_detect_exp[1]) then
+        local player_id = struct.unpack('I', e.data_modified, 0x05);
+        local target_id = struct.unpack('I', e.data_modified, 0x09);
+        local reward_amount = struct.unpack('I', e.data_modified, 0x11);
+        local message_id = struct.unpack('H', e.data_modified, 0x19) % 1024;
+        local local_player_id = AshitaCore:GetMemoryManager():GetParty():GetMemberServerId(0);
+
+        if (player_id == local_player_id and reward_amount > 0 and is_reward_kill_message(message_id)) then
+            register_kill_for_target(target_id);
+        end
     end
 end);
 
@@ -348,21 +488,40 @@ ashita.events.register('text_in', 'sealclubplus_text_in_cb', function (e)
 
     local kseal = string.match(message, string.lower(sealclub.myname) .. " obtains a kindred's seal.");
     local bseal = string.match(message, string.lower(sealclub.myname) .. " obtains a beastmen's seal.");
-    local kills = string.match(message, string.lower(sealclub.myname) .. " defeats the .");
+	local kills = nil;
+	if (sealclub.settings.kill_detect_text[1]) then
+        kills = string.match(message, string.lower(sealclub.myname) .. " defeats the .");
+    end
 	
 	-- Update last seal timestamp when obtained
 	if (kseal) then
         sealclub.kseal_count = sealclub.kseal_count + 1;
-        sealclub.last_kseal = ashita.time.clock()['ms'];
-        sealclub.kseal_notified = false;
+		local seal_time = ashita.time.clock()['ms'];
+		if (sealclub.settings.shared_beastman_timer[1]) then
+            sealclub.last_kseal = seal_time;
+            sealclub.last_bseal = seal_time;
+            sealclub.kseal_notified = false;
+            sealclub.bseal_notified = false;
+        else
+            sealclub.last_kseal = seal_time;
+            sealclub.kseal_notified = false;
+        end
 	end
 	if (bseal) then
         sealclub.bseal_count = sealclub.bseal_count + 1;
-        sealclub.last_bseal = ashita.time.clock()['ms'];
-        sealclub.bseal_notified = false;
+		local seal_time = ashita.time.clock()['ms'];
+		if (sealclub.settings.shared_beastman_timer[1]) then
+            sealclub.last_bseal = seal_time;
+            sealclub.last_kseal = seal_time;
+            sealclub.bseal_notified = false;
+            sealclub.kseal_notified = false;
+        else
+            sealclub.last_bseal = seal_time;
+            sealclub.bseal_notified = false;
+        end
 	end
     if (kills) then
-        sealclub.seals_clubbed = sealclub.seals_clubbed + 1;
+        register_text_kill();
     end
 end);
 
@@ -397,14 +556,16 @@ ashita.events.register('d3d_present', 'sealclubplus_present_cb', function ()
 		local elapsed_time = ashita.time.clock()['s'] - math.floor(sealclub.sealclub_start / 1000.0);
 		local bseal_diff = ashita.time.clock()['s'] - math.floor(sealclub.last_bseal / 1000.0);
 		local kseal_diff = ashita.time.clock()['s'] - math.floor(sealclub.last_kseal / 1000.0);
-		if (bseal_diff < sealclub.settings.bseal_cooldown) then
-			sealclub.bseal_timer = sealclub.settings.bseal_cooldown - bseal_diff;
+        local bseal_cooldown = sealclub.settings.bseal_cooldown;
+        local kseal_cooldown = sealclub.settings.shared_beastman_timer[1] and sealclub.settings.bseal_cooldown or sealclub.settings.kseal_cooldown;
+        if (bseal_diff < bseal_cooldown) then
+            sealclub.bseal_timer = bseal_cooldown - bseal_diff;
         elseif (bseal_diff >= sealclub.settings.bseal_cooldown) then
             sealclub.bseal_timer = 0;
 		end
-		if (kseal_diff < sealclub.settings.kseal_cooldown) then
-			sealclub.kseal_timer = sealclub.settings.kseal_cooldown - kseal_diff;
-        elseif (kseal_diff >= sealclub.settings.kseal_cooldown) then
+        if (kseal_diff < kseal_cooldown) then
+            sealclub.kseal_timer = kseal_cooldown - kseal_diff;
+        elseif (kseal_diff >= kseal_cooldown) then
             sealclub.kseal_timer = 0;
 		end
 

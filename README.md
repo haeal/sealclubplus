@@ -25,3 +25,7 @@ Audio:
 - Use the SealClubPlus config window to enable or disable ready sounds.
 - Use the Ready Sound dropdown to choose which .wav file is played.
 - The bundled default sound is sounds\\water_tink.wav.
+
+Changelog:
+- See CHANGELOG.md for version history and feature changes.
+

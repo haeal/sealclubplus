@@ -1,0 +1,15 @@
+# Changelog
+
+## 1.2.0
+- Added configurable kill detection methods for chat defeat text, kill-message packet detection, and reward packet detection.
+- Added kill deduplication so multiple enabled detection methods do not double count the same kill.
+- Added pet-aware kill detection via packet-based actor checks so pet killing blows can count.
+- Added a sound preview button in the config window to test the selected `.wav` immediately.
+- Added a shared Beastman timer option that forces both timers to use the Beastman cooldown and synchronize on either seal drop.
+
+## 1.1.0
+- Created SealClubPlus as a separate clone/fork of the original SealClub addon.
+- Renamed the addon identity, command, window ids, and callback ids so it can coexist with the original addon.
+- Added ready-sound support with bundled `water_tink.wav` audio.
+- Added a sound dropdown in the config window for selecting `.wav` files from the addon sounds folder.
+- Added README notes for upstream attribution and licensing.
