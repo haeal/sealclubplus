@@ -3,11 +3,11 @@
 --]]
 
 addon.author    = 'samsonffxi, haeal';
-addon.version   = '1.2.0';
+addon.version   = '1.3.0';
 addon.desc      = 'Seal farming with ready sound alerts.';
 addon.link      = 'https://github.com/haeal/sealclubplus';
 addon.name      = 'sealclubplus';
-addon.commands  = {'/sealclubplus'};
+addon.commands  = {'/scp'};
 
 require('common');
 local chat      = require('chat');
@@ -21,6 +21,7 @@ local settings  = require('settings');
 
 local C = ffi.C;
 local d3d8dev = d3d.get_device();
+local pEventSystem = ashita.memory.find('FFXiMain.dll', 0, 'A0????????84C0741AA1????????85C0741166A1????????663B05????????0F94C0C3', 0, 0);
 
 -- Default Settings
 local default_settings = T{
@@ -72,6 +73,12 @@ local sealclub = T{
 	bseal_count = 0,
 	kseal_count = 0,
     seals_clubbed = 0,
+    bseal_cycle_start_kills = 0,
+    kseal_cycle_start_kills = 0,
+    bseal_last_drop_kills = 0,
+    kseal_last_drop_kills = 0,
+    bseal_show_last_drop_kills = false,
+    kseal_show_last_drop_kills = false,
 
     bseal_notified = true,
     kseal_notified = true,
@@ -84,6 +91,40 @@ local sealclub = T{
 
 local KILL_DEDUPE_WINDOW = 1.5;
 local TARGET_KILL_MEMORY_WINDOW = 10.0;
+
+local function get_event_system_active()
+    if (pEventSystem == 0) then
+        return false;
+    end
+
+    local ptr = ashita.memory.read_uint32(pEventSystem + 1);
+    if (ptr == 0) then
+        return false;
+    end
+
+    return (ashita.memory.read_uint8(ptr) == 1);
+end
+
+local function should_hide_main_window()
+    local player = AshitaCore:GetMemoryManager():GetPlayer();
+    if (player == nil) then
+        return true;
+    end
+
+    if (player:GetMainJob() == 0) then
+        return true;
+    end
+
+    if (player:GetIsZoning() == 1) then
+        return true;
+    end
+
+    if (get_event_system_active()) then
+        return true;
+    end
+
+    return false;
+end
 
 local function get_sound_files()
     return T(ashita.fs.get_dir(addon.path:append('\\sounds\\'), '.*.wav', true) or { });
@@ -344,6 +385,8 @@ end
 function clear_rewards_plus()
     sealclub.last_kseal = ashita.time.clock()['ms'];
     sealclub.last_bseal = ashita.time.clock()['ms'];
+    sealclub.bseal_cycle_start_kills = sealclub.seals_clubbed;
+    sealclub.kseal_cycle_start_kills = sealclub.seals_clubbed;
     sealclub.settings.first_attempt = 0;
     sealclub.settings.rewards = { };
     sealclub.settings.item_count = 0;
@@ -400,42 +443,42 @@ end);
 ashita.events.register('command', 'sealclubplus_command_cb', function (e)
     -- Parse the command arguments..
     local args = e.command:args();
-    if (#args == 0 or not args[1]:any('/sealclubplus')) then
+    if (#args == 0 or not args[1]:any('/scp')) then
         return;
     end
 
     -- Block all related commands..
     e.blocked = true;
 
-    -- Handle: /sealclubplus - Toggles the sealclubplus editor.
-    -- Handle: /sealclubplus edit - Toggles the sealclubplus editor.
+    -- Handle: /scp - Toggles the sealclubplus editor.
+    -- Handle: /scp edit - Toggles the sealclubplus editor.
     if (#args == 1 or (#args >= 2 and args[2]:any('edit'))) then
         sealclub.editor.is_open[1] = not sealclub.editor.is_open[1];
         return;
     end
 
-    -- Handle: /sealclubplus save - Saves the current settings.
+    -- Handle: /scp save - Saves the current settings.
     if (#args >= 2 and args[2]:any('save')) then
         settings.save();
         print(chat.header(addon.name):append(chat.message('Settings saved.')));
         return;
     end
 
-    -- Handle: /sealclubplus reload - Reloads the current settings from disk.
+    -- Handle: /scp reload - Reloads the current settings from disk.
     if (#args >= 2 and args[2]:any('reload')) then
         settings.reload();
         print(chat.header(addon.name):append(chat.message('Settings reloaded.')));
         return;
     end
 
-    -- Handle: /sealclubplus show - Shows the sealclubplus object.
+    -- Handle: /scp show - Shows the sealclubplus object.
     if (#args >= 2 and args[2]:any('show')) then
 		-- reset last dig on show command to reset timeout counter
 		sealclub.settings.visible[1] = true;
         return;
     end
 
-    -- Handle: /sealclubplus hide - Hides the sealclubplus object.
+    -- Handle: /scp hide - Hides the sealclubplus object.
     if (#args >= 2 and args[2]:any('hide')) then
 		sealclub.settings.visible[1] = false;
         return;
@@ -452,6 +495,10 @@ ashita.events.register('packet_in', 'sealclubplus_packet_in_cb', function (e)
 	if( e.id == 0x00B ) then 
         sealclub.last_kseal = 0;
         sealclub.last_bseal = 0;
+    sealclub.bseal_cycle_start_kills = sealclub.seals_clubbed;
+    sealclub.kseal_cycle_start_kills = sealclub.seals_clubbed;
+    sealclub.bseal_show_last_drop_kills = false;
+    sealclub.kseal_show_last_drop_kills = false;
         sealclub.kseal_notified = true;
         sealclub.bseal_notified = true;
         sealclub.last_unspecified_kill = 0;
@@ -496,27 +543,43 @@ ashita.events.register('text_in', 'sealclubplus_text_in_cb', function (e)
 	-- Update last seal timestamp when obtained
 	if (kseal) then
         sealclub.kseal_count = sealclub.kseal_count + 1;
+		local kseal_kills = math.max(0, sealclub.seals_clubbed - sealclub.kseal_cycle_start_kills);
+		local bseal_kills = math.max(0, sealclub.seals_clubbed - sealclub.bseal_cycle_start_kills);
 		local seal_time = ashita.time.clock()['ms'];
 		if (sealclub.settings.shared_beastman_timer[1]) then
             sealclub.last_kseal = seal_time;
             sealclub.last_bseal = seal_time;
+            sealclub.kseal_last_drop_kills = kseal_kills;
+            sealclub.bseal_last_drop_kills = bseal_kills;
+            sealclub.kseal_show_last_drop_kills = true;
+            sealclub.bseal_show_last_drop_kills = true;
             sealclub.kseal_notified = false;
             sealclub.bseal_notified = false;
         else
             sealclub.last_kseal = seal_time;
+            sealclub.kseal_last_drop_kills = kseal_kills;
+            sealclub.kseal_show_last_drop_kills = true;
             sealclub.kseal_notified = false;
         end
 	end
 	if (bseal) then
         sealclub.bseal_count = sealclub.bseal_count + 1;
+		local bseal_kills = math.max(0, sealclub.seals_clubbed - sealclub.bseal_cycle_start_kills);
+		local kseal_kills = math.max(0, sealclub.seals_clubbed - sealclub.kseal_cycle_start_kills);
 		local seal_time = ashita.time.clock()['ms'];
 		if (sealclub.settings.shared_beastman_timer[1]) then
             sealclub.last_bseal = seal_time;
             sealclub.last_kseal = seal_time;
+            sealclub.bseal_last_drop_kills = bseal_kills;
+            sealclub.kseal_last_drop_kills = kseal_kills;
+            sealclub.bseal_show_last_drop_kills = true;
+            sealclub.kseal_show_last_drop_kills = true;
             sealclub.bseal_notified = false;
             sealclub.kseal_notified = false;
         else
             sealclub.last_bseal = seal_time;
+            sealclub.bseal_last_drop_kills = bseal_kills;
+            sealclub.bseal_show_last_drop_kills = true;
             sealclub.bseal_notified = false;
         end
 	end
@@ -545,6 +608,10 @@ ashita.events.register('d3d_present', 'sealclubplus_present_cb', function ()
         return;
     end
 
+    if (should_hide_main_window()) then
+        return;
+    end
+
     -- Hide the sealclub object if Ashita is currently hiding font objects..
     if (not AshitaCore:GetFontManager():GetVisible()) then
         return;
@@ -554,6 +621,8 @@ ashita.events.register('d3d_present', 'sealclubplus_present_cb', function ()
     imgui.SetNextWindowSize({ -1, -1, }, ImGuiCond_Always);
     if (imgui.Begin('SealClubPlus##Display', sealclub.settings.visible[1], bit.bor(ImGuiWindowFlags_NoDecoration, ImGuiWindowFlags_AlwaysAutoResize, ImGuiWindowFlags_NoFocusOnAppearing, ImGuiWindowFlags_NoNav))) then
 		local elapsed_time = ashita.time.clock()['s'] - math.floor(sealclub.sealclub_start / 1000.0);
+        local bseal_average = (sealclub.bseal_count > 0) and string.format('%.2f', sealclub.seals_clubbed / sealclub.bseal_count) or 'N/A';
+        local kseal_average = (sealclub.kseal_count > 0) and string.format('%.2f', sealclub.seals_clubbed / sealclub.kseal_count) or 'N/A';
 		local bseal_diff = ashita.time.clock()['s'] - math.floor(sealclub.last_bseal / 1000.0);
 		local kseal_diff = ashita.time.clock()['s'] - math.floor(sealclub.last_kseal / 1000.0);
         local bseal_cooldown = sealclub.settings.bseal_cooldown;
@@ -568,6 +637,23 @@ ashita.events.register('d3d_present', 'sealclubplus_present_cb', function ()
         elseif (kseal_diff >= kseal_cooldown) then
             sealclub.kseal_timer = 0;
 		end
+
+        if (sealclub.last_bseal > 0 and sealclub.bseal_timer <= 0 and sealclub.bseal_show_last_drop_kills) then
+            sealclub.bseal_cycle_start_kills = sealclub.seals_clubbed;
+            sealclub.bseal_show_last_drop_kills = false;
+        end
+
+        if (sealclub.last_kseal > 0 and sealclub.kseal_timer <= 0 and sealclub.kseal_show_last_drop_kills) then
+            sealclub.kseal_cycle_start_kills = sealclub.seals_clubbed;
+            sealclub.kseal_show_last_drop_kills = false;
+        end
+
+        local bseal_kills_since_drop = sealclub.bseal_show_last_drop_kills
+            and sealclub.bseal_last_drop_kills
+            or math.max(0, sealclub.seals_clubbed - sealclub.bseal_cycle_start_kills);
+        local kseal_kills_since_drop = sealclub.kseal_show_last_drop_kills
+            and sealclub.kseal_last_drop_kills
+            or math.max(0, sealclub.seals_clubbed - sealclub.kseal_cycle_start_kills);
 
         local played_ready_sound = false;
         if (bseal_diff > 0 and sealclub.bseal_timer > 0) then
@@ -589,11 +675,11 @@ ashita.events.register('d3d_present', 'sealclubplus_present_cb', function ()
 		
 		local btimer_display = sealclub.bseal_timer;
 		if (btimer_display <= 0) then
-			btimer_display = "Beastman Seal Ready"
+            btimer_display = "BS Ready"
 		end
 		local ktimer_display = sealclub.kseal_timer;
 		if (ktimer_display <= 0) then
-			ktimer_display = "Kindred Seal Ready"
+            ktimer_display = "KS Ready"
 		end
 
 		imgui.SetWindowFontScale(sealclub.settings.font_scale[1] + 0.1);
@@ -603,11 +689,13 @@ ashita.events.register('d3d_present', 'sealclubplus_present_cb', function ()
 		
 		imgui.Text('BSeal Timer: ');
 		imgui.SameLine();
-		if (btimer_display == 'Beastman Seal Ready') then
+        if (btimer_display == 'BS Ready') then
 			imgui.TextColored(sealclub.settings.seal_timer_ready_color, tostring(btimer_display));
 		else
 			imgui.Text(tostring(btimer_display));
 		end
+        imgui.SameLine();
+        imgui.Text(string.format('(Kills: %d | Avg: %s)', bseal_kills_since_drop, bseal_average));
         imgui.Text('Beastman Seal Count: ');
         imgui.SameLine();
 		imgui.Text(tostring(sealclub.bseal_count));
@@ -615,11 +703,13 @@ ashita.events.register('d3d_present', 'sealclubplus_present_cb', function ()
 
 		imgui.Text('KSeal Timer: ');
 		imgui.SameLine();
-		if (ktimer_display == 'Kindred Seal Ready') then
+        if (ktimer_display == 'KS Ready') then
 			imgui.TextColored(sealclub.settings.seal_timer_ready_color, tostring(ktimer_display));
 		else
 			imgui.Text(tostring(ktimer_display));
 		end
+        imgui.SameLine();
+        imgui.Text(string.format('(Kills: %d | Avg: %s)', kseal_kills_since_drop, kseal_average));
         imgui.Text('Kindred Seal Count: ');
         imgui.SameLine();
 		imgui.Text(tostring(sealclub.kseal_count));

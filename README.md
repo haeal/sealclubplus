@@ -13,12 +13,12 @@ Licensing:
 - Copyright for the original project remains with the original author.
 
 Commands:
-- /sealclubplus
-- /sealclubplus edit
-- /sealclubplus save
-- /sealclubplus reload
-- /sealclubplus show
-- /sealclubplus hide
+- /scp
+- /scp edit
+- /scp save
+- /scp reload
+- /scp show
+- /scp hide
 
 Audio:
 - Place .wav files in the sounds folder under this addon.
